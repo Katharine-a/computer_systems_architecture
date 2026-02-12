@@ -183,9 +183,26 @@ void Core::wb_stage() {
 bool Core::check_data_hazards(const Instr &instr) {
   auto exe_flags = instr.getExeFlags();
 
+  // Check for load-use data hazard: if a load instruction is in EX/MEM stage
+  // and it writes to a register that the current instruction (in ID) needs to read,
+  // we must stall the pipeline for one cycle
   if (!ex_mem_.empty()) {
     auto& ex_data = ex_mem_.data();
-    // TODO: check LDAD instruction data hazards in EX/MEM
+    auto& ex_instr = *ex_data.instr;
+    auto ex_exe_flags = ex_instr.getExeFlags();
+    
+    // Check if instruction in EX/MEM is a load that writes to rd
+    if (ex_exe_flags.is_load && ex_exe_flags.use_rd && ex_instr.getRd() != 0) {
+      uint32_t ex_rd = ex_instr.getRd();
+      
+      // Check if current instruction needs to read from the same register
+      if ((exe_flags.use_rs1 && instr.getRs1() == ex_rd) ||
+          (exe_flags.use_rs2 && instr.getRs2() == ex_rd)) {
+        // Load-use hazard detected: stall pipeline
+        DT(2, "Load-use hazard detected: stalling pipeline (#" << if_id_.data().uuid << ")");
+        return true;
+      }
+    }
   }
 
   return false;
@@ -194,16 +211,40 @@ bool Core::check_data_hazards(const Instr &instr) {
 bool Core::data_forwarding(uint32_t reg, uint32_t* data) {
   bool forwarded = false;
 
+  // Priority 1: Forward from EX/MEM stage (most recent data)
+  // This handles ALU instructions and other non-load instructions
   if (!ex_mem_.empty()) {
     auto& ex_data = ex_mem_.data();
     auto& ex_instr = *ex_data.instr;
-    // TODO: check data forwarding from EX/MEM
+    auto ex_exe_flags = ex_instr.getExeFlags();
+    
+    // Check if instruction in EX/MEM writes to the register we need
+    if (ex_exe_flags.use_rd && ex_instr.getRd() == reg && ex_instr.getRd() != 0) {
+      // Forward ALU result from EX/MEM stage
+      // Note: For loads, the result is not ready yet (load-use hazard handled separately)
+      // For non-load instructions, the ALU result is available
+      if (!ex_exe_flags.is_load) {
+        *data = ex_data.result;
+        forwarded = true;
+        DT(2, "Data forwarding EX/MEM: reg=" << reg << ", data=0x" << std::hex << *data << std::dec);
+      }
+    }
   }
 
+  // Priority 2: Forward from MEM/WB stage (if EX/MEM didn't forward)
+  // This handles load instructions and instructions that completed MEM stage
   if (!forwarded && !mem_wb_.empty()) {
     auto& mem_data = mem_wb_.data();
     auto& mem_instr = *mem_data.instr;
-    // TODO: check data forwarding from MEM/WB
+    auto mem_exe_flags = mem_instr.getExeFlags();
+    
+    // Check if instruction in MEM/WB writes to the register we need
+    if (mem_exe_flags.use_rd && mem_instr.getRd() == reg && mem_instr.getRd() != 0) {
+      // Forward result from MEM/WB stage (includes load results)
+      *data = mem_data.result;
+      forwarded = true;
+      DT(2, "Data forwarding MEM/WB: reg=" << reg << ", data=0x" << std::hex << *data << std::dec);
+    }
   }
 
   return forwarded;

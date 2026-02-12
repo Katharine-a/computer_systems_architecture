@@ -9,7 +9,7 @@ CXXFLAGS += -I$(CURDIR) -I$(COMMON_DIR)
 CXXFLAGS += -DXLEN_$(XLEN)
 CXXFLAGS += $(CONFIGS)
 
-LDFLAGS +=
+LDFLAGS += #-static-libstdc++ -static-libgcc
 
 SRCS = $(COMMON_DIR)/util.cpp $(COMMON_DIR)/mem.cpp
 SRCS += $(SRC_DIR)/main.cpp $(SRC_DIR)/processor.cpp $(SRC_DIR)/core.cpp $(SRC_DIR)/decode.cpp $(SRC_DIR)/execute.cpp

@@ -25,12 +25,19 @@
 
 using namespace tinyrv;
 
+bool is_csr_writable(uint32_t addr);
+
 uint32_t Core::alu_unit(const Instr &instr, uint32_t rs1_data, uint32_t rs2_data, uint32_t PC) {
   auto exe_flags  = instr.getExeFlags();
   auto alu_op     = instr.getAluOp();
 
-  uint32_t alu_s1 = exe_flags.alu_s1_PC ? PC : (exe_flags.alu_s1_rs1 ? instr.getRs1() :  rs1_data);
-  uint32_t alu_s2 = exe_flags.alu_s2_imm ? instr.getImm() : rs2_data;
+  // LUI: rd = imm (upper 20 bits), so alu_s1 should be 0
+  uint32_t alu_s1 = (instr.getOpcode() == Opcode::LUI) ? 0 
+                   : (exe_flags.alu_s1_PC ? PC : (exe_flags.alu_s1_rs1 ? instr.getRs1() : rs1_data));
+  
+  // CSR instructions: alu_s2 is the CSR value (read from CSR register)
+  uint32_t alu_s2 = exe_flags.alu_s2_csr ? this->get_csr(instr.getImm())
+                   : (exe_flags.alu_s2_imm ? instr.getImm() : rs2_data);
 
   if (exe_flags.alu_s1_inv) {
     alu_s1 = ~alu_s1;
@@ -42,59 +49,59 @@ uint32_t Core::alu_unit(const Instr &instr, uint32_t rs1_data, uint32_t rs2_data
   case AluOp::NONE:
     break;
   case AluOp::ADD: {
-    rd_data = // TODO:
+    rd_data = alu_s1 + alu_s2;
     break;
   }
   case AluOp::SUB: {
-    rd_data = // TODO:
+    rd_data = alu_s1 - alu_s2;
     break;
   }
   case AluOp::MUL: {
-    rd_data = // TODO;
+    rd_data = (uint32_t)((int32_t)alu_s1 * (int32_t)alu_s2);
     break;
   }
   case AluOp::MULH: {
-    rd_data = // TODO;
+    rd_data = (uint32_t)(((int64_t)(int32_t)alu_s1 * (int32_t)alu_s2) >> 32);
     break;
   }
   case AluOp::MULHSU: {
-    rd_data = // TODO;
+    rd_data = (uint32_t)(((int64_t)(int32_t)alu_s1 * (uint32_t)alu_s2) >> 32);
     break;
   }
   case AluOp::MULHU: {
-    rd_data = // TODO;
+    rd_data = (uint32_t)(((uint64_t)alu_s1 * (uint64_t)alu_s2) >> 32);
     break;
   }
   case AluOp::AND: {
-    rd_data = // TODO:
+    rd_data = alu_s1 & alu_s2;
     break;
   }
   case AluOp::OR: {
-    rd_data = // TODO:
+    rd_data = alu_s1 | alu_s2;
     break;
   }
   case AluOp::XOR: {
-    rd_data = // TODO:
+    rd_data = alu_s1 ^ alu_s2;
     break;
   }
   case AluOp::SLL: {
-    rd_data = // TODO:
+    rd_data = alu_s1 << (alu_s2 & 0x1f);
     break;
   }
   case AluOp::SRL: {
-    rd_data = // TODO:
+    rd_data = (uint32_t)alu_s1 >> (alu_s2 & 0x1f);
     break;
   }
   case AluOp::SRA: {
-    rd_data = // TODO:
+    rd_data = (uint32_t)((int32_t)alu_s1 >> (alu_s2 & 0x1f));
     break;
   }
   case AluOp::LTI: {
-    rd_data = // TODO:
+    rd_data = ((int32_t)alu_s1 < (int32_t)alu_s2) ? 1 : 0;
     break;
   }
   case AluOp::LTU: {
-    rd_data = // TODO:
+    rd_data = (alu_s1 < alu_s2) ? 1 : 0;
     break;
   }
   default:
@@ -114,31 +121,31 @@ uint32_t Core::branch_unit(const Instr &instr, uint32_t rs1_data, uint32_t rs2_d
     break;
   case BrOp::JAL:
   case BrOp::JALR: {
-    br_taken = // TODO:
+    br_taken = true;
     break;
   }
   case BrOp::BEQ: {
-    br_taken = // TODO:
+    br_taken = (rs1_data == rs2_data);
     break;
   }
   case BrOp::BNE: {
-    br_taken = // TODO:
+    br_taken = (rs1_data != rs2_data);
     break;
   }
   case BrOp::BLT: {
-    br_taken = // TODO:
+    br_taken = ((int32_t)rs1_data < (int32_t)rs2_data);
     break;
   }
   case BrOp::BGE: {
-    br_taken = // TODO:
+    br_taken = ((int32_t)rs1_data >= (int32_t)rs2_data);
     break;
   }
   case BrOp::BLTU: {
-    br_taken = // TODO:
+    br_taken = (rs1_data < rs2_data);
     break;
   }
   case BrOp::BGEU: {
-    br_taken = // TODO:
+    br_taken = (rs1_data >= rs2_data);
     break;
   }
   default:
@@ -151,11 +158,11 @@ uint32_t Core::branch_unit(const Instr &instr, uint32_t rs1_data, uint32_t rs2_d
     if (br_taken) {
       uint32_t next_PC = PC + 4;
       if (br_op == BrOp::JAL || br_op == BrOp::JALR) {
-        rd_data = // TODO:
+        rd_data = next_PC;  // return address
       }
       // check misprediction
       if (br_op != BrOp::JAL && br_target != next_PC) {
-        PC_ = // TODO:
+        PC_ = br_target;
         // flush pipeline
         if_id_.reset();
         fetch_stalled_ = false;
@@ -176,20 +183,23 @@ uint32_t Core::mem_access(const Instr &instr, uint32_t rd_data, uint32_t rs2_dat
   if (exe_flags.is_load) {
     uint64_t mem_addr = rd_data;
     uint32_t data_bytes = 1 << (func3 & 0x3);
-    uint32_t data_width = 8 * data_bytes;
     uint32_t read_data = 0;
     this->dmem_read(&read_data, mem_addr, data_bytes);
     switch (func3) {
-    case 0: // RV32I: LB
-    case 1: // RV32I: LH
-      rd_data = sext(read_data, data_width);
+    case 0: // RV32I: LB - sign-extend 8-bit to 32-bit
+      rd_data = sext(read_data, 8);
       break;
-    case 2: // RV32I: LW
-      rd_data = // TODO:
+    case 1: // RV32I: LH - sign-extend 16-bit to 32-bit
+      rd_data = sext(read_data, 16);
       break;
-    case 4: // RV32I: LBU
-    case 5: // RV32I: LHU
-      rd_data = // TODO:
+    case 2: // RV32I: LW - full 32-bit word
+      rd_data = read_data;
+      break;
+    case 4: // RV32I: LBU - zero-extend 8-bit to 32-bit
+      rd_data = read_data & 0xff;
+      break;
+    case 5: // RV32I: LHU - zero-extend 16-bit to 32-bit
+      rd_data = read_data & 0xffff;
       break;
     default:
       std::abort();
@@ -211,12 +221,31 @@ uint32_t Core::mem_access(const Instr &instr, uint32_t rd_data, uint32_t rs2_dat
     }
   }
 
-  // handle CSR write
+  // handle CSR instructions
+  // RISC-V CSR semantics: rd = old_CSR, CSR = new_CSR (computed by ALU)
+  // The ALU computed: new_CSR = f(old_CSR, rs1/uimm) where f is ADD/OR/AND
+  // We need to return the old CSR value to rd
+  // Per RISC-V spec: CSR write only occurs if source operand (rs1/uimm) != 0
+  // Also, writes to read-only CSRs should be silently ignored
   if (exe_flags.is_csr) {
-    if (rs2_data != rd_data) {
-      this->set_csr(instr.getImm(), rd_data);
+    uint32_t csr_addr = instr.getImm();
+    uint32_t old_csr = this->get_csr(csr_addr);  // read old CSR value
+    uint32_t new_csr = rd_data;                  // ALU computed new CSR value
+    
+    // Determine source operand: for immediate variants (CSRRWI/CSRRSI/CSRRCI), 
+    // use instr.getRs1() (which contains the zero-extended immediate);
+    // for register variants, use rs1_data from EX/MEM pipeline (instruction in MEM is ex_mem_.data())
+    uint32_t rs1_data = ex_mem_.data().rs1_data;
+    uint32_t src_operand = exe_flags.alu_s1_rs1 ? instr.getRs1() : rs1_data;
+    
+    // Per RISC-V spec: write CSR only if source operand != 0
+    // Also check if CSR is writable (read-only CSRs like MHARTID should be ignored)
+    if (src_operand != 0 && is_csr_writable(csr_addr)) {
+      this->set_csr(csr_addr, new_csr);
     }
-    rd_data = rs2_data;
+    
+    // Return old CSR value to rd
+    rd_data = old_csr;
   }
 
   return rd_data;
@@ -271,6 +300,24 @@ uint32_t Core::get_csr(uint32_t addr) {
   }
 }
 
+bool is_csr_writable(uint32_t addr) {
+  switch (addr) {
+  case VX_CSR_SATP:
+  case VX_CSR_MSTATUS:
+  case VX_CSR_MEDELEG:
+  case VX_CSR_MIDELEG:
+  case VX_CSR_MIE:
+  case VX_CSR_MTVEC:
+  case VX_CSR_MEPC:
+  case VX_CSR_PMPCFG0:
+  case VX_CSR_PMPADDR0:
+  case VX_CSR_MNSTATUS:
+    return true;
+  default:
+    return false;  // Read-only CSRs (like MHARTID) or invalid addresses
+  }
+}
+
 void Core::set_csr(uint32_t addr, uint32_t value) {
   switch (addr) {
   case VX_CSR_SATP:
@@ -285,8 +332,8 @@ void Core::set_csr(uint32_t addr, uint32_t value) {
   case VX_CSR_MNSTATUS:
     break;
   default: {
-      std::cout << std::hex << "Error: invalid CSR write addr=0x" << addr << ", value=0x" << value << std::endl;
-      std::abort();
-    }
+    std::cout << std::hex << "Error: invalid CSR write addr=0x" << addr << ", value=0x" << value << std::endl;
+    std::abort();
+  }
   }
 }
