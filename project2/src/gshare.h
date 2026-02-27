@@ -18,6 +18,8 @@
 
 #include <vector>
 
+#define PARAM_SIZE (BHR_SIZE + 1)
+
 namespace tinyrv {
 
 class BranchPredictor {
@@ -43,7 +45,13 @@ public:
 
   uint32_t predict(uint32_t PC) override;
   void update(uint32_t PC, uint32_t next_PC, bool taken) override;
+protected:
+  /* Branch History Register */
+  uint32_t BHR_;
 
+  uint32_t BTB_lookup(uint32_t PC);
+  void update_BHR(bool taken);
+  void update_BTB(uint32_t PC, uint32_t next_PC);
 private:
 
   struct BTB_entry_t {
@@ -58,9 +66,6 @@ private:
   /* Branch History Table */
   std::vector<int8_t> BHT_;
 
-  /* Branch History Register */
-  uint32_t BHR_;
-
   /* Masks and shifts */
   uint32_t BTB_shift_;
   uint32_t BTB_mask_;
@@ -71,13 +76,10 @@ private:
   uint32_t bht_index(uint32_t PC);
   uint32_t pc_tag(uint32_t PC);
 
-  uint32_t BTB_lookup(uint32_t PC);
-  void update_BHR(bool taken);
   void update_BHT(uint32_t index, bool taken);
-  void update_BTB(uint32_t PC, uint32_t next_PC);
 };
 
-class GSharePlus : public BranchPredictor {
+class GSharePlus : public GShare {
 public:
   GSharePlus(uint32_t BTB_size, uint32_t BHR_size);
 
@@ -87,6 +89,16 @@ public:
   void update(uint32_t PC, uint32_t next_PC, bool taken) override;
 
   // TODO: extra credit component
+  private:
+  uint32_t perceptron_table_index_(uint32_t PC);
+  bool run_perceptron_model_(uint32_t index, std::array<int32_t, PARAM_SIZE> input);
+  std::array<int32_t, PARAM_SIZE> get_input_(uint32_t PC);
+  void update_perceptron_table_(uint32_t index, bool taken, std::array<int32_t, PARAM_SIZE> input);
+
+  std::vector<std::array<int32_t,PARAM_SIZE>> perceptron_table_;
+  uint32_t input_mask_;
+  bool predict_taken_;
+
 };
 
 }
