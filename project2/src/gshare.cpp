@@ -40,16 +40,20 @@ GShare::~GShare() {
   //--
 }
 
-uint32_t GShare::btb_index(uint32_t PC){
+uint32_t GShare::btb_index(uint32_t PC) const {
   return (PC >> 2) & BTB_mask_;
 }
 
-uint32_t GShare::pc_tag(uint32_t PC){
+uint32_t GShare::pc_tag(uint32_t PC) const {
   return (PC >> 2) >> BTB_shift_;
 }
 
-uint32_t GShare::bht_index(uint32_t PC){
+uint32_t GShare::bht_index(uint32_t PC) const {
   return ((PC >> 2) ^ BHR_) & BHR_mask_;
+}
+
+bool GShare::gshare_predict_taken(uint32_t PC) const {
+  return BHT_.at(bht_index(PC)) >= 2;
 }
 
 uint32_t GShare::BTB_lookup(uint32_t PC) {
@@ -108,8 +112,11 @@ void GShare::update(uint32_t PC, uint32_t next_PC, bool taken) {
 
 GSharePlus::GSharePlus(uint32_t BTB_size, uint32_t BHR_size)
   : GShare(BTB_size, BHR_size)
-  , perceptron_table_((1 << BHR_size), std::array<int32_t,9>{0}) // initialize all weights and bias to 0, default taken prediction
-  , input_mask_((1 << PARAM_SIZE) - 1) // mask for 9 LSBs of BHR
+  , perceptron_table_((1 << BHR_size), std::array<int32_t,PARAM_SIZE>{0})
+  , selector_((1 << BHR_size), 0)   /* 0 = prefer gshare; 2-bit counters, 0-1 gshare, 2-3 perceptron */
+  , choice_((1 << BHR_size), false)
+  , selector_mask_((1 << BHR_size) - 1)
+  , input_mask_((1 << BHR_size) - 1)  /* 8-bit index for perceptron table */
   , predict_taken_(true)
   {
   (void) BTB_size;
@@ -121,7 +128,11 @@ GSharePlus::~GSharePlus() {
 }
 
 uint32_t GSharePlus::perceptron_table_index_(uint32_t PC){
-  return (PC >> 2) & input_mask_; // 8 bit index
+  return (PC >> 2) & input_mask_;
+}
+
+uint32_t GSharePlus::selector_index_(uint32_t PC){
+  return (PC >> 2) & selector_mask_;
 }
 
 bool GSharePlus::run_perceptron_model_(uint32_t index, std::array<int32_t, PARAM_SIZE> input){
@@ -134,53 +145,77 @@ bool GSharePlus::run_perceptron_model_(uint32_t index, std::array<int32_t, PARAM
 }
 
 std::array<int32_t, PARAM_SIZE> GSharePlus::get_input_(uint32_t BHR){
-  uint32_t input_val =((BHR << 1) | 0b1 );
+  uint32_t input_val = ((BHR << 1) | 0b1) & ((1u << PARAM_SIZE) - 1);
   std::array<int32_t, PARAM_SIZE> input = {0};
-  /* Note that bias is element 0 of the array. */
-  for (uint8_t i = 0 ; i < input.size(); i++) {
-    input[i] = (input_val & (0b1 << i)) ? 1 : 0;
+  /* Bias is element 0 of the array. */
+  for (uint8_t i = 0; i < input.size(); i++) {
+    input[i] = (input_val & (1u << i)) ? 1 : 0;
   }
   return input;
 }
 
 uint32_t GSharePlus::predict(uint32_t PC) {
-  uint32_t index = perceptron_table_index_(PC);
-  std::array<int32_t, PARAM_SIZE> input = get_input_(BHR_);
-  bool predict_taken = run_perceptron_model_(index, input);
-  predict_taken_ = predict_taken;
-  uint32_t next_PC = predict_taken ? BTB_lookup(PC) : PC + 4;
-  // TODO: extra credit component
+  bool gshare_taken = gshare_predict_taken(PC);
+  uint32_t pidx = perceptron_table_index_(PC);
+  bool perceptron_taken = run_perceptron_model_(pidx, get_input_(BHR_));
 
+  uint32_t sel_idx = selector_index_(PC);
+  bool use_gshare = (selector_[sel_idx] < 2);  /* 0,1 -> gshare; 2,3 -> perceptron */
+  choice_[sel_idx] = !use_gshare;               /* true if we used perceptron */
+  predict_taken_ = use_gshare ? gshare_taken : perceptron_taken;
+
+  uint32_t next_PC = predict_taken_ ? BTB_lookup(PC) : PC + 4;
   DT(3, "*** GShare+: predict PC=0x" << std::hex << PC << std::dec
         << ", next_PC=0x" << std::hex << next_PC << std::dec
-        << ", predict_taken=" << predict_taken);
+        << ", predict_taken=" << predict_taken_ << " ("
+        << (use_gshare ? "gshare" : "perceptron") << ")");
   return next_PC;
 }
 
 void GSharePlus::update_perceptron_table_(uint32_t index, bool taken, std::array<int32_t, PARAM_SIZE> input){
-  if (predict_taken_ != taken) { /* only update if there was a misprediction */
-    std::array<int32_t, PARAM_SIZE> weights = perceptron_table_[index];
-    for (uint8_t i = 0; i < weights.size(); i++) {
-      weights[i] += weights[i] + (taken ? 1 : -1)*input[i];
+  if (predict_taken_ != taken) {
+    for (uint8_t i = 0; i < PARAM_SIZE; i++) {
+      int32_t delta = (taken ? 1 : -1) * input[i];
+      int32_t w = perceptron_table_[index][i] + delta;
+      if (w > PERCEPTRON_WEIGHT_MAX) w = PERCEPTRON_WEIGHT_MAX;
+      if (w < PERCEPTRON_WEIGHT_MIN) w = PERCEPTRON_WEIGHT_MIN;
+      perceptron_table_[index][i] = static_cast<int32_t>(w);
+    }
   }
+}
+
+void GSharePlus::update_selector_(uint32_t sel_idx, bool used_perceptron, bool pred_correct){
+  int8_t& c = selector_[sel_idx];
+  if (used_perceptron) {
+    if (pred_correct)
+      c = (c < 3) ? c + 1 : 3;
+    else
+      c = (c > 0) ? c - 1 : 0;
+  } else {
+    if (pred_correct)
+      c = (c > 0) ? c - 1 : 0;
+    else
+      c = (c < 3) ? c + 1 : 3;
   }
 }
 
 void GSharePlus::update(uint32_t PC, uint32_t next_PC, bool taken) {
-  (void) PC;
-  (void) next_PC;
-  (void) taken;
-
   DT(3, "*** GShare+: update PC=0x" << std::hex << PC << std::dec
         << ", next_PC=0x" << std::hex << next_PC << std::dec
         << ", taken=" << taken);
 
-  // TODO: extra credit component
-  update_perceptron_table_(perceptron_table_index_(PC), taken, get_input_(PC));
-  update_BHR(taken);
-  if (taken) {
-    update_BTB(PC, next_PC);
-  }
+  uint32_t sel_idx = selector_index_(PC);
+  bool used_perceptron = choice_[sel_idx];
+  bool gshare_pred = gshare_predict_taken(PC);
+  bool perceptron_pred = run_perceptron_model_(perceptron_table_index_(PC), get_input_(BHR_));
+  bool pred_correct = used_perceptron ? (perceptron_pred == taken) : (gshare_pred == taken);
+  update_selector_(sel_idx, used_perceptron, pred_correct);
+
+  predict_taken_ = used_perceptron ? perceptron_pred : gshare_pred;
+  std::array<int32_t, PARAM_SIZE> input = get_input_(BHR_);
+
+  GShare::update(PC, next_PC, taken);
+  update_perceptron_table_(perceptron_table_index_(PC), taken, input);
 }
 
 

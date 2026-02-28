@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <array>
 #include <vector>
 
 #define PARAM_SIZE (BHR_SIZE + 1)
@@ -52,6 +53,8 @@ protected:
   uint32_t BTB_lookup(uint32_t PC);
   void update_BHR(bool taken);
   void update_BTB(uint32_t PC, uint32_t next_PC);
+  bool gshare_predict_taken(uint32_t PC) const;
+
 private:
 
   struct BTB_entry_t {
@@ -72,9 +75,9 @@ private:
   uint32_t BHR_mask_;
 
   /* Helpers */
-  uint32_t btb_index(uint32_t PC);
-  uint32_t bht_index(uint32_t PC);
-  uint32_t pc_tag(uint32_t PC);
+  uint32_t btb_index(uint32_t PC) const;
+  uint32_t bht_index(uint32_t PC) const;
+  uint32_t pc_tag(uint32_t PC) const;
 
   void update_BHT(uint32_t index, bool taken);
 };
@@ -88,16 +91,22 @@ public:
   uint32_t predict(uint32_t PC) override;
   void update(uint32_t PC, uint32_t next_PC, bool taken) override;
 
-  // TODO: extra credit component
   private:
   uint32_t perceptron_table_index_(uint32_t PC);
+  uint32_t selector_index_(uint32_t PC);
   bool run_perceptron_model_(uint32_t index, std::array<int32_t, PARAM_SIZE> input);
-  std::array<int32_t, PARAM_SIZE> get_input_(uint32_t PC);
+  std::array<int32_t, PARAM_SIZE> get_input_(uint32_t BHR);
   void update_perceptron_table_(uint32_t index, bool taken, std::array<int32_t, PARAM_SIZE> input);
+  void update_selector_(uint32_t sel_idx, bool used_perceptron, bool pred_correct);
 
   std::vector<std::array<int32_t,PARAM_SIZE>> perceptron_table_;
+  std::vector<int8_t> selector_;   /* meta-predictor: 2-bit counters, 0-1 prefer gshare, 2-3 prefer perceptron */
+  std::vector<bool> choice_;       /* which predictor was used (true = perceptron) for last prediction per index */
+  uint32_t selector_mask_;
   uint32_t input_mask_;
   bool predict_taken_;
+  static constexpr int8_t PERCEPTRON_WEIGHT_MAX = 127;
+  static constexpr int8_t PERCEPTRON_WEIGHT_MIN = -128;
 
 };
 
